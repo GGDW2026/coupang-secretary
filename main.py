@@ -3,7 +3,6 @@ import hmac
 import hashlib
 import time
 import requests
-from urllib.parse import urlencode
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from slack_bolt import App
@@ -13,20 +12,21 @@ from slack_bolt.adapter.fastapi import SlackRequestHandler
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 
-COUPANG_ACCESS_KEY = os.environ.get("COUPANG_ACCESS_KEY").strip() if os.environ.get("COUPANG_ACCESS_KEY") else ""
-COUPANG_SECRET_KEY = os.environ.get("COUPANG_SECRET_KEY").strip() if os.environ.get("COUPANG_SECRET_KEY") else ""
-COUPANG_VENDOR_ID = os.environ.get("COUPANG_VENDOR_ID").strip() if os.environ.get("COUPANG_VENDOR_ID") else ""
+COUPANG_ACCESS_KEY = os.environ.get("COUPANG_ACCESS_KEY", "").strip()
+COUPANG_SECRET_KEY = os.environ.get("COUPANG_SECRET_KEY", "").strip()
+COUPANG_VENDOR_ID = os.environ.get("COUPANG_VENDOR_ID", "").strip()
 
 # 2. Slack Bolt 앱 & FastAPI 앱 초기화
 slack_app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
 handler = SlackRequestHandler(slack_app)
 api_app = FastAPI()
 
-# 3. 쿠팡 WING 표준 HMAC 서명 생성 함수
+# 3. 쿠팡 WING HMAC 서명 생성 함수 (표준 공식 적용)
 def generate_coupang_signature(method: str, uri: str, secret_key: str, access_key: str) -> str:
     # GMT 기준 표준 날짜 포맷 (YYMMDDTHHMMSSZ)
     datetime_gmt = datetime.now(timezone.utc).strftime('%y%m%dT%H%M%SZ')
     
+    # URL에서 경로와 쿼리 분리
     message = datetime_gmt + method.upper() + uri
     
     signature = hmac.new(
@@ -39,18 +39,16 @@ def generate_coupang_signature(method: str, uri: str, secret_key: str, access_ke
 
 # 4. 쿠팡 WING API [결제완료] 주문 수집 함수
 def get_coupang_paid_orders():
-    today = datetime.now()
-    start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
-    end_date = today.strftime('%Y-%m-%d')
+    # 날짜 포맷 설정 (최근 7일)
+    now = datetime.now(timezone.utc)
+    end_date = now.strftime('%Y-%m-%d')
+    start_date = (now.timestamp() - (7 * 24 * 60 * 60))
+    start_date_str = datetime.fromtimestamp(start_date, timezone.utc).strftime('%Y-%m-%d')
 
+    # 쿼리 파라미터를 알파벳 순서대로 정렬하여 URI 구성
     path = f"/v2/providers/openapi/apis/api/v4/vendors/{COUPANG_VENDOR_ID}/ordersheets"
-    query_params = {
-        "createdAtFrom": start_date,
-        "createdAtTo": end_date,
-        "status": "ACCEPT"
-    }
-    query_string = urlencode(query_params)
-    full_uri = f"{path}?{query_string}"
+    query_str = f"createdAtFrom={start_date_str}&createdAtTo={end_date}&status=ACCEPT"
+    full_uri = f"{path}?{query_str}"
     
     auth_header = generate_coupang_signature("GET", full_uri, COUPANG_SECRET_KEY, COUPANG_ACCESS_KEY)
     
