@@ -33,7 +33,7 @@ def generate_coupang_signature(method: str, uri: str, secret_key: str, access_ke
     ).hexdigest()
     return f"CEA algorithm=HmacSHA256, access-key={access_key}, signed-date={datetime_gmt}, signature={signature}"
 
-# 4. 쿠팡 WING API [결제완료] 주문 수집 함수
+# 4. 쿠팡 WING API [결제완료] 주문 수집 함수 (에러 상세 반환)
 def get_coupang_paid_orders():
     today = datetime.now()
     start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -43,7 +43,7 @@ def get_coupang_paid_orders():
     query_params = {
         "createdAtFrom": start_date,
         "createdAtTo": end_date,
-        "status": "ACCEPT"  # ACCEPT = 결제완료 상태 코드
+        "status": "ACCEPT"
     }
     query_string = urlencode(query_params)
     full_uri = f"{path}?{query_string}"
@@ -62,28 +62,34 @@ def get_coupang_paid_orders():
         res_data = response.json()
         return res_data.get("data", [])
     else:
+        # 쿠팡이 거절한 원인(상태 코드와 에러 메시지)을 그대로 반환
         print(f"쿠팡 API 에러: {response.status_code} - {response.text}")
-        return None
+        return f"ERROR_{response.status_code}_{response.text}"
 
-# 5. 슬랙에서 봇을 태그하거나 말을 걸었을 때 실행되는 스마트 대화 핸들러
+# 5. 슬랙 멘션 핸들러
 @slack_app.event("app_mention")
 def handle_app_mentions(event, say):
     text = event.get("text", "")
     
-    # "주문", "신규", "확인" 등의 단어가 들어가면 자동으로 주문 조회 실행
-    if "주문" in text or "신규" in text or "확인" in text or "목록" in text:
+    if "주문" in text or "신규" in text or "확인" in text or "목록" in text or "보여" in text:
         say("⏳ 쿠팡 WING에서 **[결제완료]** 주문을 조회하고 있습니다 잠시만요! 📦")
         
-        orders = get_coupang_paid_orders()
+        result = get_coupang_paid_orders()
         
-        if orders is None:
-            say("❌ 쿠팡 API 연결에 실패했습니다. 환경 변수(Access Key, Secret Key 등)를 다시 확인해 주세요.")
+        # 에러 문자열이 반환된 경우 슬랙에 원인 출력
+        if isinstance(result, str) and result.startswith("ERROR_"):
+            say(f"❌ 쿠팡 API 연동 실패:\n```{result}```")
             return
 
-        if not orders:
+        if result is None:
+            say("❌ 쿠팡 API 응답을 받지 못했습니다.")
+            return
+
+        if not result:
             say("✅ 현재 **[결제완료]** 상태인 신규 주문이 없습니다.")
             return
 
+        orders = result
         blocks = [
             {
                 "type": "header",
@@ -128,10 +134,9 @@ def handle_app_mentions(event, say):
 
         say(blocks=blocks)
     else:
-        say("안녕하세요! 저는 쿠팡 위탁판매 비서입니다. 저를 태그하고 **'신규 주문 확인해줘'**라고 말씀해 보세요!")
+        say("안녕하세요! 저를 태그하고 **'결제완료 주문 보여줘'**라고 말씀해 보세요!")
 
-# 6. FastAPI 라우터 설정 (Slack Event 수신)
+# 6. FastAPI 라우터 설정
 @api_app.post("/slack/events")
 async def slack_events_endpoint(req: Request):
-    return await handler.handle(req)
     return await handler.handle(req)
