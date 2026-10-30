@@ -33,7 +33,7 @@ def generate_coupang_signature(method: str, uri: str, secret_key: str, access_ke
     
     return f"CEA algorithm=HmacSHA256, access-key={access_key}, signed-date={datetime_gmt}, signature={signature}"
 
-# 4. 쿠팡 WING API [결제완료] 주문 수집 함수 (안전장치 추가)
+# 4. 쿠팡 WING API [결제완료] 주문 수집 함수
 def get_coupang_paid_orders():
     try:
         now = datetime.now(timezone.utc)
@@ -54,7 +54,6 @@ def get_coupang_paid_orders():
         
         url = f"https://api-gateway.coupang.com{full_uri}"
         
-        # 10초 이상 응답이 없으면 타임아웃 처리
         response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 200:
@@ -109,7 +108,7 @@ def handle_app_mentions(event, say):
             receiver_name = order.get("receiver", {}).get("name", "이름 없음")
             receiver_addr = order.get("receiver", {}).get("addr1", "") + " " + order.get("receiver", {}).get("addr2", "")
             
-                items_str = ""
+            items_str = ""
             for item in order.get("orderItems", []):
                 product_name = item.get("vendorItemName")
                 quantity = item.get("shippingCount")
@@ -121,7 +120,7 @@ def handle_app_mentions(event, say):
                     {"type": "mrkdwn", "text": f"*주문번호:*\n{order_id}"},
                     {"type": "mrkdwn", "text": f"*주문일시:*\n{order_date}"},
                     {"type": "mrkdwn", "text": f"*수령인:*\n{receiver_name}"},
-                    {"type": "mrkdwn", "text": f"*배송지:*\n{receiver_addr}"}
+                    {"type": "mrjdwn", "text": f"*배송지:*\n{receiver_addr}"}
                 ]
             })
             blocks.append({
