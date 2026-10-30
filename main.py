@@ -1,7 +1,6 @@
 import os
 import hmac
 import hashlib
-import time
 import requests
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request
@@ -21,12 +20,9 @@ slack_app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
 handler = SlackRequestHandler(slack_app)
 api_app = FastAPI()
 
-# 3. 쿠팡 WING HMAC 서명 생성 함수 (표준 공식 적용)
+# 3. 쿠팡 WING HMAC 서명 생성 함수
 def generate_coupang_signature(method: str, uri: str, secret_key: str, access_key: str) -> str:
-    # GMT 기준 표준 날짜 포맷 (YYMMDDTHHMMSSZ)
     datetime_gmt = datetime.now(timezone.utc).strftime('%y%m%dT%H%M%SZ')
-    
-    # URL에서 경로와 쿼리 분리
     message = datetime_gmt + method.upper() + uri
     
     signature = hmac.new(
@@ -37,35 +33,40 @@ def generate_coupang_signature(method: str, uri: str, secret_key: str, access_ke
     
     return f"CEA algorithm=HmacSHA256, access-key={access_key}, signed-date={datetime_gmt}, signature={signature}"
 
-# 4. 쿠팡 WING API [결제완료] 주문 수집 함수
+# 4. 쿠팡 WING API [결제완료] 주문 수집 함수 (안전장치 추가)
 def get_coupang_paid_orders():
-    # 날짜 포맷 설정 (최근 7일)
-    now = datetime.now(timezone.utc)
-    end_date = now.strftime('%Y-%m-%d')
-    start_date = (now.timestamp() - (7 * 24 * 60 * 60))
-    start_date_str = datetime.fromtimestamp(start_date, timezone.utc).strftime('%Y-%m-%d')
+    try:
+        now = datetime.now(timezone.utc)
+        end_date = now.strftime('%Y-%m-%d')
+        start_date = (now.timestamp() - (7 * 24 * 60 * 60))
+        start_date_str = datetime.fromtimestamp(start_date, timezone.utc).strftime('%Y-%m-%d')
 
-    # 쿼리 파라미터를 알파벳 순서대로 정렬하여 URI 구성
-    path = f"/v2/providers/openapi/apis/api/v4/vendors/{COUPANG_VENDOR_ID}/ordersheets"
-    query_str = f"createdAtFrom={start_date_str}&createdAtTo={end_date}&status=ACCEPT"
-    full_uri = f"{path}?{query_str}"
-    
-    auth_header = generate_coupang_signature("GET", full_uri, COUPANG_SECRET_KEY, COUPANG_ACCESS_KEY)
-    
-    headers = {
-        "Authorization": auth_header,
-        "Content-Type": "application/json;charset=UTF-8"
-    }
-    
-    url = f"https://api-gateway.coupang.com{full_uri}"
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        res_data = response.json()
-        return res_data.get("data", [])
-    else:
-        print(f"쿠팡 API 에러: {response.status_code} - {response.text}")
-        return f"ERROR_{response.status_code}_{response.text}"
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{COUPANG_VENDOR_ID}/ordersheets"
+        query_str = f"createdAtFrom={start_date_str}&createdAtTo={end_date}&status=ACCEPT"
+        full_uri = f"{path}?{query_str}"
+        
+        auth_header = generate_coupang_signature("GET", full_uri, COUPANG_SECRET_KEY, COUPANG_ACCESS_KEY)
+        
+        headers = {
+            "Authorization": auth_header,
+            "Content-Type": "application/json;charset=UTF-8"
+        }
+        
+        url = f"https://api-gateway.coupang.com{full_uri}"
+        
+        # 10초 이상 응답이 없으면 타임아웃 처리
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            res_data = response.json()
+            return res_data.get("data", [])
+        else:
+            print(f"쿠팡 API 에러: {response.status_code} - {response.text}")
+            return f"ERROR_{response.status_code}_{response.text}"
+            
+    except Exception as e:
+        print(f"통신 중 예외 발생: {str(e)}")
+        return f"ERROR_EXCEPTION_{str(e)}"
 
 # 5. 슬랙 멘션 핸들러
 @slack_app.event("app_mention")
@@ -108,7 +109,7 @@ def handle_app_mentions(event, say):
             receiver_name = order.get("receiver", {}).get("name", "이름 없음")
             receiver_addr = order.get("receiver", {}).get("addr1", "") + " " + order.get("receiver", {}).get("addr2", "")
             
-            items_str = ""
+                items_str = ""
             for item in order.get("orderItems", []):
                 product_name = item.get("vendorItemName")
                 quantity = item.get("shippingCount")
