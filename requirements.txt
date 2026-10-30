@@ -1,5 +1,0 @@
-Plaintext
-fastapi
-uvicorn
-slack_bolt
-requests
