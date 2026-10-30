@@ -1,29 +1,31 @@
 import os
-import time
 import hmac
 import hashlib
+import time
 import requests
+from urllib.parse import urlencode
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
 
-# 1. 환경 변수 (보유하고 계신 키 값들을 이곳에 연결합니다)
+# 1. 환경 변수 로드
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+
 COUPANG_ACCESS_KEY = os.environ.get("COUPANG_ACCESS_KEY")
 COUPANG_SECRET_KEY = os.environ.get("COUPANG_SECRET_KEY")
 COUPANG_VENDOR_ID = os.environ.get("COUPANG_VENDOR_ID")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
+# 2. Slack Bolt 앱 & FastAPI 앱 초기화
+slack_app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
+handler = SlackRequestHandler(slack_app)
 api_app = FastAPI()
-handler = SlackRequestHandler(app)
 
-# 2. 쿠팡 API HMAC 인증 서명 생성기
-def generate_coupang_signature(method, url, secret_key, access_key):
-    path, *query = url.split("?")
-    datetime_gmt = time.strftime('%y%m%d' + 'T' + '%H%M%S' + 'Z', time.gmtime())
-    message = datetime_gmt + method + path + (query[0] if query else "")
+# 3. 쿠팡 WING HMAC 서명 생성 함수
+def generate_coupang_signature(method: str, uri: str, secret_key: str, access_key: str) -> str:
+    datetime_gmt = time.strftime('%y%m%dT%H%M%SZ', time.gmtime())
+    message = datetime_gmt + method + uri
     signature = hmac.new(
         secret_key.encode('utf-8'),
         message.encode('utf-8'),
@@ -31,66 +33,105 @@ def generate_coupang_signature(method, url, secret_key, access_key):
     ).hexdigest()
     return f"CEA algorithm=HmacSHA256, access-key={access_key}, signed-date={datetime_gmt}, signature={signature}"
 
-# 3. 쿠팡 신규 주문(결제 완료) 조회 함수
-def fetch_coupang_orders():
-    method = "GET"
-    url = f"/v2/providers/seller_api/apis/v1/marketplace/vendor-documents/{COUPANG_VENDOR_ID}/orderSheets?status=ACCEPT"
-    host = "https://api-gateway.coupang.com"
+# 4. 쿠팡 WING API [결제완료] 주문 수집 함수
+def get_coupang_paid_orders():
+    today = datetime.now()
+    start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+    end_date = today.strftime('%Y-%m-%d')
+
+    path = f"/v2/providers/openapi/apis/api/v4/vendors/{COUPANG_VENDOR_ID}/ordersheets"
+    query_params = {
+        "createdAtFrom": start_date,
+        "createdAtTo": end_date,
+        "status": "ACCEPT"  # ACCEPT = 결제완료 상태 코드
+    }
+    query_string = urlencode(query_params)
+    full_uri = f"{path}?{query_string}"
+    
+    auth_header = generate_coupang_signature("GET", full_uri, COUPANG_SECRET_KEY, COUPANG_ACCESS_KEY)
     
     headers = {
-        "Authorization": generate_coupang_signature(method, url, COUPANG_SECRET_KEY, COUPANG_ACCESS_KEY),
-        "Content-Type": "application/json",
-        "X-Requested-By": COUPANG_ACCESS_KEY
+        "Authorization": auth_header,
+        "Content-Type": "application/json;charset=UTF-8"
     }
     
-    response = requests.get(host + url, headers=headers)
+    url = f"https://api-gateway.coupang.com{full_uri}"
+    
+    response = requests.get(url, headers=headers)
     if response.status_code == 200:
-        return response.json().get("data", [])
-    return []
+        res_data = response.json()
+        return res_data.get("data", [])
+    else:
+        print(f"쿠팡 API 에러: {response.status_code} - {response.text}")
+        return None
 
-# 4. 슬랙 명령어: "/신규주문확인" 입력 시 동작
-@app.command("/신규주문확인")
-def handle_check_orders(ack, respond, command):
-    ack()
-    respond("🔍 쿠팡 WING에서 신규 주문 내역을 조회 중입니다...")
+# 5. 슬랙에서 봇을 태그하거나 말을 걸었을 때 실행되는 스마트 대화 핸들러
+@slack_app.event("app_mention")
+def handle_app_mentions(event, say):
+    text = event.get("text", "")
     
-    orders = fetch_coupang_orders()
-    
-    if not orders:
-        respond("📦 현재 처리해야 할 신규 주문이 없습니다.")
-        return
+    # "주문", "신규", "확인" 등의 단어가 들어가면 자동으로 주문 조회 실행
+    if "주문" in text or "신규" in text or "확인" in text or "목록" in text:
+        say("⏳ 쿠팡 WING에서 **[결제완료]** 주문을 조회하고 있습니다 잠시만요! 📦")
+        
+        orders = get_coupang_paid_orders()
+        
+        if orders is None:
+            say("❌ 쿠팡 API 연결에 실패했습니다. 환경 변수(Access Key, Secret Key 등)를 다시 확인해 주세요.")
+            return
 
-    # 주문 요약 메시지 구성
-    msg = f"🛒 **총 {len(orders)}건의 신규 주문이 접수되었습니다.**\n마스터 테이블 기록 및 발주 프로세스를 진행하시겠습니까?"
-    
-    respond(
-        blocks=[
-            {"type": "section", "text": {"type": "mrkdwn", "text": msg}},
+        if not orders:
+            say("✅ 현재 **[결제완료]** 상태인 신규 주문이 없습니다.")
+            return
+
+        blocks = [
             {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "🚀 자동 발주 및 시트 기록 승인"},
-                        "style": "primary",
-                        "action_id": "approve_fulfillment"
-                    }
-                ]
-            }
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"📦 쿠팡 신규 주문 목록 (총 {len(orders)}건)",
+                    "emoji": True
+                }
+            },
+            {"type": "divider"}
         ]
-    )
 
-# 5. 슬랙 버튼 클릭 시 승인 처리 및 후속 작업 실행
-@app.action("approve_fulfillment")
-def handle_approval(ack, body, respond):
-    ack()
-    respond("⚡ 승인이 확인되었습니다. 구글 시트 마스터 테이블에 기록하고 도매몰 연동을 시작합니다...")
-    
-    # [추후 확장 영역] 구글 시트 API 연동 및 도매몰 발주 로직이 여기에 들어갑니다.
-    
-    respond("✨ 모든 주문의 마스터 테이블 기록 및 발주 프로세스가 완료되었습니다!")
+        for order in orders:
+            order_id = order.get("orderId")
+            order_date = order.get("orderedAt")
+            receiver_name = order.get("receiver", {}).get("name", "이름 없음")
+            receiver_addr = order.get("receiver", {}).get("addr1", "") + " " + order.get("receiver", {}).get("addr2", "")
+            
+            items_str = ""
+            for item in order.get("orderItems", []):
+                product_name = item.get("vendorItemName")
+                quantity = item.get("shippingCount")
+                items_str += f"• *{product_name}* ({quantity}개)\n"
 
-# 슬랙 이벤트 수신 라우터
+            blocks.append({
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*주문번호:*\n{order_id}"},
+                    {"type": "mrkdwn", "text": f"*주문일시:*\n{order_date}"},
+                    {"type": "mrkdwn", "text": f"*수령인:*\n{receiver_name}"},
+                    {"type": "mrkdwn", "text": f"*배송지:*\n{receiver_addr}"}
+                ]
+            })
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*주문 상품:*\n{items_str}"
+                }
+            })
+            blocks.append({"type": "divider"})
+
+        say(blocks=blocks)
+    else:
+        say("안녕하세요! 저는 쿠팡 위탁판매 비서입니다. 저를 태그하고 **'신규 주문 확인해줘'**라고 말씀해 보세요!")
+
+# 6. FastAPI 라우터 설정 (Slack Event 수신)
 @api_app.post("/slack/events")
-async def endpoint(req: Request):
+async def slack_events_endpoint(req: Request):
+    return await handler.handle(req)
     return await handler.handle(req)
