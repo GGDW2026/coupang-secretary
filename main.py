@@ -4,7 +4,7 @@ import hashlib
 import time
 import requests
 from urllib.parse import urlencode
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
@@ -13,27 +13,31 @@ from slack_bolt.adapter.fastapi import SlackRequestHandler
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 
-COUPANG_ACCESS_KEY = os.environ.get("COUPANG_ACCESS_KEY")
-COUPANG_SECRET_KEY = os.environ.get("COUPANG_SECRET_KEY")
-COUPANG_VENDOR_ID = os.environ.get("COUPANG_VENDOR_ID")
+COUPANG_ACCESS_KEY = os.environ.get("COUPANG_ACCESS_KEY").strip() if os.environ.get("COUPANG_ACCESS_KEY") else ""
+COUPANG_SECRET_KEY = os.environ.get("COUPANG_SECRET_KEY").strip() if os.environ.get("COUPANG_SECRET_KEY") else ""
+COUPANG_VENDOR_ID = os.environ.get("COUPANG_VENDOR_ID").strip() if os.environ.get("COUPANG_VENDOR_ID") else ""
 
 # 2. Slack Bolt 앱 & FastAPI 앱 초기화
 slack_app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
 handler = SlackRequestHandler(slack_app)
 api_app = FastAPI()
 
-# 3. 쿠팡 WING HMAC 서명 생성 함수
+# 3. 쿠팡 WING 표준 HMAC 서명 생성 함수
 def generate_coupang_signature(method: str, uri: str, secret_key: str, access_key: str) -> str:
-    datetime_gmt = time.strftime('%y%m%dT%H%M%SZ', time.gmtime())
-    message = datetime_gmt + method + uri
+    # GMT 기준 표준 날짜 포맷 (YYMMDDTHHMMSSZ)
+    datetime_gmt = datetime.now(timezone.utc).strftime('%y%m%dT%H%M%SZ')
+    
+    message = datetime_gmt + method.upper() + uri
+    
     signature = hmac.new(
         secret_key.encode('utf-8'),
         message.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
+    
     return f"CEA algorithm=HmacSHA256, access-key={access_key}, signed-date={datetime_gmt}, signature={signature}"
 
-# 4. 쿠팡 WING API [결제완료] 주문 수집 함수 (에러 상세 반환)
+# 4. 쿠팡 WING API [결제완료] 주문 수집 함수
 def get_coupang_paid_orders():
     today = datetime.now()
     start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -62,7 +66,6 @@ def get_coupang_paid_orders():
         res_data = response.json()
         return res_data.get("data", [])
     else:
-        # 쿠팡이 거절한 원인(상태 코드와 에러 메시지)을 그대로 반환
         print(f"쿠팡 API 에러: {response.status_code} - {response.text}")
         return f"ERROR_{response.status_code}_{response.text}"
 
@@ -76,7 +79,6 @@ def handle_app_mentions(event, say):
         
         result = get_coupang_paid_orders()
         
-        # 에러 문자열이 반환된 경우 슬랙에 원인 출력
         if isinstance(result, str) and result.startswith("ERROR_"):
             say(f"❌ 쿠팡 API 연동 실패:\n```{result}```")
             return
